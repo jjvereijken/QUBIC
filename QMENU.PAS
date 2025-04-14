@@ -1,0 +1,474 @@
+UNIT QMenu;
+
+(* this unit provides a menu structure that drives the program *)
+
+INTERFACE
+
+  USES
+
+    QVisual, Qtypes, QObjRoot, QMinMax, QStrats, QDBase, QTimer, Strings,
+    {$IFDEF WINDOWS} WinDos, WinCrt {$ELSE} Dos, Crt {$ENDIF};
+
+  PROCEDURE GoQubic; { the actual program }
+
+IMPLEMENTATION
+
+VAR
+
+  Status                 : MenuStatus;
+  i                      : BYTE;
+  GameBoard              : VisualBoardObj;
+  CalcBoard              : StrategyServer;
+  TotalTimeX, TotalTimeO : Timer;
+  MoveTimeX, MoveTimeO   : Timer;
+  SpeedUp                : REAL;
+  PlyDeep                : 1..64;
+  LogFile                : TEXT;
+
+PROCEDURE DisplayMenu;
+
+  BEGIN
+    GotoXY(1,1);
+    WriteLn('  Qubic menu options : ');
+    WriteLn;
+    WriteLn('      X : change player for X        O : change player for O');
+    WriteLn;
+    WriteLn('      + : increment searchdepth      - : decrement searchdepth');
+    WriteLn;
+    WriteLn('      S : save a game to disk        L : load a game from disk');
+    WriteLn;
+    WriteLn('      R : reset game                 C : cycle through strategies');
+    WriteLn;
+    WriteLn('      P : play Qubic!                Q : quit');
+  END;
+
+PROCEDURE DisplayStatus;
+
+  BEGIN
+    GotoXY(1,13);
+    WriteLn('  Qubic status : ');
+    WriteLn;
+    Write  ('      Current strategy            : ', Plydeep, '-ply deep ', CalcBoard.NameOfStrategy); ClrEol;
+    WriteLn;
+    WriteLn;
+    Write  ('      Current player for X        : ');
+      IF Status.X_Player = Human THEN Write('Human') ELSE Write('Computer');
+    ClrEol;
+    WriteLn;
+    Write  ('      Current player for O        : ');
+      IF Status.O_Player = Human THEN Write('Human') ELSE Write('Computer');
+    ClrEol;
+    WriteLn;
+    WriteLn;
+    WriteLn('      Total time used by player X : ', TotalTimeX.SecsPassed:6:0, ' seconds');
+    WriteLn('      Total time used by player O : ', TotalTimeO.SecsPassed:6:0, ' seconds');
+  END;
+
+PROCEDURE ResetGame;
+
+  BEGIN
+    WITH Status DO BEGIN
+      X_Player := Human;
+      O_Player := Computer;
+      FOR i := 0 TO 63 DO Moves[i] := 0;
+      LastMove := -1;
+      MTX := 0; MTO :=0 ; TTX := 0; TTO := 0; { the ticks on the timers }
+    END;
+    PlyDeep := 3; { intially search 3 ply deep }
+    GameBoard.Init;
+    CalcBoard.Init;
+    TotalTimeX.Reset;
+    TotalTimeO.Reset;
+    WriteLn(LogFile, 'Game was reset to initial state.');
+    WriteLn(LogFile);
+  END;
+
+PROCEDURE GetFileName(VAR FileName : String12; VAR Succes : BOOLEAN);
+
+  VAR
+
+    Name : STRING;
+
+  BEGIN
+    GotoXY(1,24);
+    Write('Please enter a name (max. 8 chars) : '); ClrEol;
+    ShowCursor;
+    REPEAT
+      ReadLn(Name);
+    UNTIL Length(Name) <= 8;
+    HideCursor;
+    Succes := (Length(Name) > 0);
+    Upper(Name);
+    FileName := Name + '.GAM';
+    GotoXY(1,24); ClrEol;
+  END;
+
+PROCEDURE SaveGame;
+
+  VAR
+
+    FileName : String12;
+    Succes   : BOOLEAN;
+    fd       : FILE OF MenuStatus;
+
+  BEGIN
+    { first save the timers }
+    WITH Status DO BEGIN
+      MTX := MoveTimeX.TicksPassed;
+      MTO := MoveTimeO.TicksPassed;
+      TTX := TotalTimeX.TicksPassed;
+      TTO := TotalTimeO.TicksPassed;
+    END;
+    GetFileName(FileName, Succes);
+    IF Succes THEN BEGIN
+      { save the entire status to disk }
+      Assign(fd, FileName);
+      {$I-} { we handle IO errors ourselves }
+      IF Succes THEN ReWrite(fd);
+      Succes := Succes AND (IOResult = 0);
+      IF Succes THEN Write(fd, Status);
+      Succes := Succes AND (IOResult = 0);
+      IF Succes THEN Close(fd);
+      Succes := Succes AND (IOResult = 0);
+      {$I+} { end of IO }
+      IF Succes THEN Beep ELSE Buzz;
+    END;
+  END;
+
+PROCEDURE LoadGame;
+
+  VAR
+
+    FileName : String12;
+    Succes   : BOOLEAN;
+    fd       : FILE OF MenuStatus;
+    i        : -1..63;
+    p        : Color;
+
+  BEGIN
+    GetFileName(FileName, Succes);
+    IF Succes THEN BEGIN
+      { save the entire status to disk }
+      Assign(fd, FileName);
+      {$I-} { we handle IO errors ourselves }
+      IF Succes THEN Reset(fd);
+      Succes := Succes AND (IOResult = 0);
+      IF Succes THEN Read(fd, Status);
+      Succes := Succes AND (IOResult = 0);
+      IF Succes THEN Close(fd);
+      Succes := Succes AND (IOResult = 0);
+      {$I+} { end of IO }
+      IF Succes THEN Beep ELSE Buzz;
+      { now make the boards reflect the new status }
+      GameBoard.Init;
+      CalcBoard.Init;
+      WITH Status DO BEGIN
+        FOR i := 0 TO Status.LastMove DO BEGIN
+          IF (i MOD 2) = 0 THEN p := X ELSE p := O;
+          GameBoard.PutPiece(p, Status.Moves[i]);
+          CalcBoard.PutPiece(p, Status.Moves[i]);
+        END;
+        { restore the timers }
+        MoveTimeX.TicksPassed := MTX;
+        MoveTimeO.TicksPassed := MTO;
+        TotalTimeX.TicksPassed := TTX;
+        TotalTimeO.TicksPassed := TTO;
+      END;
+      IF Succes THEN BEGIN
+        WriteLn(LogFile, 'User loaded game ''', FileName, ''' from disk.');
+        WriteLn(LogFile);
+      END;
+    END;
+  END;
+
+PROCEDURE MakeMove(Player : Color; Move : FieldNumber);
+
+  { effectuate move Move by player Player }
+
+  BEGIN
+    GameBoard.PutPiece(Player, Move);
+    CalcBoard.PutPiece(Player, Move);
+    Inc(Status.LastMove); { yet another move done! }
+    Status.Moves[Status.LastMove] := Move; { and update the history }
+  END;
+
+FUNCTION Conclusions(k3, r3 : BYTE; EValue : INTEGER) : STRING;
+
+  CONST
+
+    Good = 128;
+
+  VAR
+
+    s : STRING;
+
+  BEGIN
+    IF EValue = +MAXINT THEN s := 'player X can force a win!'
+    ELSE IF Evalue = -MAXINT THEN s := 'player O can force a win!'
+    ELSE IF (k3 > 0) AND (r3 = 0) THEN s := 'player X has a 3-in-a-row'
+    ELSE IF (r3 > 0) AND (k3 = 0) THEN s := 'player O has a 3-in-a-row'
+    ELSE IF (k3 > 0) AND (r3 > 0) THEN s := 'both players have a 3-in-a-row, weird...'
+    ELSE CASE Evalue OF
+      -MAXINT..-2*Good  : s := 'clearly in favor of player O';
+      -2*Good+1..-Good  : s := 'slightly in favor of player O';
+      -Good+1..Good-1   : s := 'quite undecided';
+      Good..2*Good-1    : s := 'slightly in favor of player X';
+      2*Good..+MAXINT   : s := 'clearly in favor of player X';
+    END;
+    Conclusions := s;
+  END;
+
+PROCEDURE LogDumpBoard(Board : PositionObj);
+
+{ dump the pieces to the logfile }
+
+  VAR
+
+    i, f : FieldNumber;
+
+  BEGIN
+    FOR i := 0 TO 63 DO BEGIN
+      IF (i MOD 16) = 0 THEN Write(LogFile, '  ');
+      f := (i MOD 4) + 4*(i DIV 16) + 16*((i DIV 4) MOD 4);
+      Write(LogFile, ColToChar(Board.GetPiece(f)));
+      IF (i MOD 4) = 3 THEN Write(LogFile, '   ');
+      IF (i MOD 16) = 15 THEN WriteLn(LogFile);
+    END;
+    WriteLn(LogFile);
+  END;
+
+PROCEDURE PlayQubic;
+
+  PROCEDURE GenerateMove(Player : Color; VAR Succes : BOOLEAN; VAR Value : INTEGER);
+
+   { get and effectuate a move, either by the player, or by the computer }
+   { return through value the evaluation the computer hopes to get       }
+
+    VAR
+
+      Move  : FieldNumber;
+      Depth : SearchDepth;
+
+    BEGIN
+      GotoXY(1,19);
+      Write('Action         : player ', ColToChar(Player),' ');
+      IF ((Player = X) AND (Status.X_Player = Human)) OR
+         ((Player = O) AND (Status.O_Player = Human))
+        THEN BEGIN
+        { Human to move }
+        Write('firing neurons'); ClrEol;
+        Move := 0; { to avoid out of range error }
+        GameBoard.GetMove(Move, Succes);
+        Value := 0; { human does not search tree ! }
+        IF Succes THEN WriteLn(LogFile, 'Human player ', ColToChar(Player), ' put a stone on field ', Move:2, '.');
+      END
+      ELSE BEGIN
+        { Computer to move }
+        CalcBoard.ResetNodesCounter;
+        Move := 0;
+        { determine searchdepth }
+        IF Status.LastMove + PlyDeep <= 63 THEN
+          Depth := PlyDeep { go PlyDeep, bottom not yet reached }
+        ELSE
+          Depth := 63 - Status.LastMove; { go all the way till the bottom }
+        Write('performing ', Depth, '-ply deep ', CalcBoard.NameOfStrategy); ClrEol;
+
+        CalcBoard.CalculateMove(Move, Value, Depth, Player);
+        SpeedUp := MiniMaxSpeedUp(Status.LastMove+1, Depth, CalcBoard.NodesSearched);
+        Beep;
+        Succes := TRUE; { this returned a valid move for certain! }
+        WriteLn(LogFile, 'Computer player ', ColToChar(Player), ' put a stone on field ', Move:2, '.');
+      END;
+      IF Succes THEN MakeMove(Player, Move); { effectuate our move }
+      IF ((Player = X) AND (Status.X_Player = Human)) OR
+         ((Player = O) AND (Status.O_Player = Human))
+        THEN Value := CalcBoard.Evaluation; { fake E[...]! }
+      WriteLn(LogFile);
+      IF Succes THEN LogDumpBoard(GameBoard);
+    END;
+
+
+  VAR
+
+    Succes               : BOOLEAN;
+    BestMoveValue        : INTEGER;
+
+  BEGIN
+    ClrScr;
+    GameBoard.ShowBoard;
+    GameBoard.ShowPieces;
+    MoveTimeX.Reset;
+    MoveTimeO.Reset;
+    BestMoveValue := 0;
+    REPEAT
+      GotoXY(1,20);
+      WriteLn('Situation      : ');
+      WriteLn('Evaluation     : ');
+      WriteLn('Nodes searched : ');
+      WriteLn('Time used by X : last move ', MoveTimeX.SecsPassed:9:2, ' secs',
+              ', in total ', TotalTimeX.SecsPassed:6:0, ' secs');
+      Write  ('Time used by O : last move ', MoveTimeO.SecsPassed:9:2, ' secs',
+              ', in total ', TotalTimeO.SecsPassed:6:0, ' secs');
+      IF (Status.LastMove + 1) MOD 2 = 0 THEN BEGIN
+        { X to move }
+        MoveTimeX.Reset; MoveTimeX.Start; TotalTimeX.Start;
+        GenerateMove(X, Succes, BestMoveValue);
+        TotalTimeX.Stop; MoveTimeX.Stop;
+      END
+      ELSE BEGIN
+        { O to move }
+        MoveTimeO.Reset; MoveTimeO.Start; TotalTimeO.Start;
+        GenerateMove(O, Succes, BestMoveValue);
+        TotalTimeO.Stop; MoveTimeO.Stop;
+      END;
+      GotoXY(1,20);
+      Write  ('Situation      : ', Conclusions(CalcBoard.k3, CalcBoard.r3, BestMoveValue)); ClrEol;
+      WriteLn(LogFile, '  Situation  : ', Conclusions(CalcBoard.k3, CalcBoard.r3, BestMoveValue));
+      WriteLn;
+      WITH CalcBoard DO BEGIN
+        Write('Evaluation     : ',Evaluation,
+              ' E[', BestMoveValue, ']',
+              ' k(', k1, ',', k2, ',', k3, ') r(', r1, ',',r2 ,',', r3, ')',
+              ' lt=', lt); ClrEol;
+        WriteLn(LogFile, '  Evaluation : ',Evaluation,
+              ' E[', BestMoveValue, ']',
+              ' k(', k1, ',', k2, ',', k3, ') r(', r1, ',',r2 ,',', r3, ')',
+              ' lt=', lt);
+      END;
+      WriteLn;
+      Write  ('Nodes searched : ');
+      IF ((Status.LastMove MOD 2 = 0) AND (Status.X_Player = Computer)) OR
+         ((Status.LastMove MOD 2 = 1) AND (Status.O_Player = Computer)) THEN BEGIN
+        { computer made last move, so write NodesSearched information }
+        Write(CalcBoard.NodesSearched, ' (');
+        IF Status.LastMove MOD 2 = 0 THEN
+          Write(CalcBoard.NodesSearched/MoveTimeX.SecsPassed:0:0)
+        ELSE
+          Write(CalcBoard.NodesSearched/MoveTimeO.SecsPassed:0:0);
+        Write(' nodes/sec, speedup = ', SpeedUp:0:2, ')'); ClrEol;
+        WriteLn(LogFile, '  Nodes      : ', CalcBoard.NodesSearched, ' seached by ',
+                         PlyDeep, '-ply deep ', CalcBoard.NameOfStrategy);
+      END
+      ELSE
+        Write('[does not apply for human player]');
+      ClrEol;
+      Write(LogFile, '  Time taken : ');
+      CASE Status.LastMove MOD 2 OF
+        0 : WriteLn(LogFile, MoveTimeX.SecsPassed:0:2, ' seconds');
+        1 : WriteLn(LogFile, MoveTimeO.SecsPassed:0:2, ' seconds');
+      END;
+      WriteLn(LogFile);
+      Flush(LogFile); { make sure it is really written to disk }
+      GameBoard.ShowPieces;
+      IF (Status.X_player = Computer) AND (Status.O_player = Computer) AND
+         KeyPressed AND (ReadKey = ESCKey) THEN BEGIN
+        { give the user a chance to interrupt the computer playing itself }
+        Beep;
+        Succes := FALSE;
+      END;
+    UNTIL (NOT Succes) OR (Status.LastMove = 63) OR (CalcBoard.GameOver);
+    IF Succes THEN BEGIN
+      { game over one way or another, wait for ESC to allow the user }
+      { to look at the board some more time                          }
+      GotoXY(1,19);
+      Write('Action         : [game over] '); ClrEol; WriteLn;
+      Write('Situation      : ');
+      CASE CalcBoard.Winner OF
+        X   : BEGIN
+                Write('player X has won');
+                WriteLn(LogFile, '*** Player X won. ***');
+                WriteLn(LogFile);
+              END;
+        O   : BEGIN
+                Write('player O has won');
+                WriteLn(LogFile, '*** Player O won. ***');
+                WriteLn(LogFile);
+              END;
+        None: BEGIN
+                Write('game ended in a draw');
+                WriteLn(LogFile, '*** Game ended in a draw. ***');
+                WriteLn(LogFile);
+              END;
+      END;
+      ClrEol;
+      REPEAT UNTIL ReadKey = ESCKey;
+    END;
+  END;
+
+PROCEDURE GoQubic;
+
+  VAR
+
+    Key : CHAR;
+
+  BEGIN
+    ClrScr;
+    DisplayMenu;
+    REPEAT
+      DisplayStatus;
+      Key := UpCase(ReadKey);
+      IF Key IN ['X', 'O', '+', '-', 'S', 'L', 'R', 'C', 'P', 'Q'] THEN Beep ELSE Buzz;
+      CASE Key OF
+        'X' : CASE Status.X_Player OF
+                Human    : Status.X_Player := Computer;
+                Computer : Status.X_Player := Human;
+              END;
+        'O' : CASE Status.O_Player OF
+                Human    : Status.O_Player := Computer;
+                Computer : Status.O_Player := Human;
+              END;
+        '+' : IF Plydeep < 64 THEN Inc(Plydeep);
+        '-' : IF Plydeep > 1  THEN Dec(Plydeep);
+        'S' : SaveGame;
+        'L' : LoadGame;
+        'R' : ResetGame;
+        'C' : CalcBoard.CycleStrategy;
+        'P' : IF NOT (Status.LastMove = 63) AND NOT (CalcBoard.GameOver) THEN
+                BEGIN
+                  PlayQubic;
+                  Beep;
+                  ClrScr;
+                  DisplayMenu;
+                END;
+      END;
+    UNTIL Key = 'Q';
+    WriteLn(LogFile, 'Logging stopped at ', Now);
+    Close(LogFile); { close the logfile before returning to DOS }
+    {$IFDEF WINDOWS}
+      DoneWinCrt;
+    {$ENDIF WINDOWS}
+  END;
+
+BEGIN
+
+  { open the logfile }
+
+  Assign(LogFile, LogFileName);
+  {$I-} ReWrite(LogFile); {$I+}
+  IF IOResult <> 0 THEN BEGIN
+    { opening the logfile failed, so flush all logs to NUL: }
+    Buzz;
+    Assign(LogFile, 'NUL');
+    ReWrite(LogFile);
+  END
+  ELSE Beep;
+  WriteLn(LogFile);
+  WriteLn(LogFile, 'ษอออออออออออออออออออออออออออออออออออออออออออออออออออออออป');
+  WriteLn(LogFile, 'บ Qubic V1.0 Logfile       (c) 1991 Jan Joris Vereijken บ');
+  WriteLn(LogFile, 'ศอออออออออออออออออออออออออออออออออออออออออออออออออออออออผ');
+  WriteLn(LogFile);
+  WriteLn(LogFile, 'Logging started at ', Now);
+  WriteLn(LogFile);
+
+  {$IFDEF WINDOWS}
+  StrCopy(WindowTitle, 'Qubic V1.0');
+  InitWinCrt;
+  {$ENDIF}
+
+  { initialize the MenuStatus }
+
+  ResetGame;
+
+  System.FileMode := 0; { make Reset() open files in readonly mode }
+
+END.
